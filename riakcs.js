@@ -20,19 +20,230 @@ var request = require('request');
 // our own library
 var esc = require('./esc');
 
-
 // --------------------------------------------------------------------------------------------------------------------
 // constants
 
 var MARK = 'riakcs: ';
 
-var debug = false;
+var debug = true;
 
 // create our XML parser
 var parser = new xml2js.Parser({ normalize : false, trim : false, explicitRoot : true });
 
 var userAgent = 'NodeRiakCS';
 
+// --------------------------------------------------------------------------------------------------------------------
+// utility functions
+
+function load(path) {
+    // since NodeJS caches requires, we won't cache them here
+    return require('./' + path);
+}
+
+function addParam(params, name, value) {
+    params.push({ 'name' : name, 'value' : value });
+}
+
+function addParamIfDefined(params, name, value) {
+    if ( ! _.isUndefined(value) ) {
+        params.push({ 'name' : name, 'value' : value });
+    }
+}
+
+// Takes an array and adds params with names like:
+//
+// * Name.0, Name.1, Name.2, Name.3, ...
+//
+// or if you specify 'extra', the names will be:
+//
+// * Name.Extra.0, Name.Extra.1, Name.Extra.2, ...
+function addParamArray(params, name, value, prefix) {
+    value = value || [];
+
+    prefix = '' + name + '.' + (prefix ? prefix + '.' : '');
+    // if it's a string, just add this single value
+    if ( typeof value === 'string' ) {
+        params.push({ 'name' : prefix + '1', 'value' : value });
+        return;
+    }
+
+    // else it's an array, so add them all
+    for ( var i = 0; i < value.length; i++ ) {
+        params.push({ 'name' : prefix + (i+1), 'value' : value[i] });
+    }
+}
+
+// Takes an array and adds params with names like (for three calls of 'Id', 'Name', 'Zone'):
+//
+// * SetName.1.Id,   SetName.2.Id,   SetName.3.Id,   ...
+// * SetName.1.Name, SetName.2.Name, SetName.3.Name, ...
+// * SetName.1.Zone, SetName.2.Zone, SetName.3.Zone, ...
+function addParamArraySet(params, setName, name, value, prefix) {
+    value = value || [];
+
+    // if it's a string, just add this single value
+    if ( typeof value === 'string' ) {
+        params.push({ 'name' : setName + '.1.' + name, 'value' : value });
+        return;
+    }
+
+    // else it's an array, so add them all
+    _.each(value, function(v, i) {
+        if ( _.isUndefined(v) ) {
+            return;
+        }
+        params.push({ 'name' : setName + '.' + (i+1) + '.' + name, 'value' : v });
+    });
+}
+
+// Takes an array of arrays and adds params with names like:
+//
+// * SetName.<i>.Name.<j>
+// * Item.<i>.Attribute.<j>
+// * Filter.<i>.Value.<j> (e.g. Amazon:EC2:DescribeInstances)
+function addParam2dArray(params, setName, name, value) {
+    value = value || [];
+
+    if ( typeof value === 'undefined' ) {
+        // nothing to do
+        return;
+    }
+
+    // if it's a string, just add this single value
+    if ( typeof value === 'string' ) {
+        params.push({ 'name' : setName + '.1.' + name + '.1', 'value' : value });
+        return;
+    }
+
+    // else it's an array, so add them all
+    _.each(value, function(set, i) {
+        if ( _.isUndefined(set) ) {
+            return;
+        }
+
+        _.each(set, function(v, j) {
+            params.push({ 'name' : setName + '.' + (i+1) + '.' + name + '.' + (j+1), 'value' : v });
+        });
+    });
+}
+
+// Takes an array of arrays and adds params with names like:
+//
+// * SetName.X.SubSetName.Y.Id
+// * Item.X.Attribute.Y.Id
+// * Item.X.Attribute.Y.Id
+function addParam2dArraySet(params, setName, subsetName, name, value) {
+    value = value || [];
+
+    // if it's a string, just add this single value
+    if ( typeof value === 'string' ) {
+        params.push({ 'name' : setName + '.1.' + subsetName + '.1.' + name, 'value' : value });
+        return;
+    }
+
+    // else it's an array, so add them all
+    _.each(value, function(set, i) {
+        if ( _.isUndefined(set) ) {
+            return;
+        }
+
+        _.each(set, function(v, j) {
+            params.push({ 'name' : setName + '.' + (i+1) + '.' + subsetName + '.' + (j+1) + '.' + name, 'value' : v });
+        });
+    });
+}
+
+// Takes an array of objects and adds params with names like:
+//
+// * Item.X.Key1
+// * Item.X.Key2
+// * Item.Y.Key1
+// * Item.Y.Key2
+//
+// or
+//
+// * Item.prefix.X.Key1
+// * Item.prefix.X.Key2
+// * Item.prefix.Y.Key1
+// * Item.prefix.Y.Key2
+function addParamArrayOfObjects(params, name, array, prefix) {
+    prefix = prefix ? '.' + prefix : '';
+    // loop through all the array elements
+    _.each(array, function(obj, i) {
+        if ( _.isUndefined(obj) ) {
+            return;
+        }
+
+        // loop through all the keys in this object
+        _.each(obj, function(value, key) {
+            params.push({ 'name' : name + prefix + '.' + (i+1) + '.' + key, 'value' : '' + value });
+        });
+    });
+}
+
+// Takes an array of objects and adds params with names like:
+//
+// * Item.prefix.1.Key1.Something
+// * Item.prefix.1.Key2.Else
+// * Item.prefix.2.Key1.Whatever.Is.Here
+// * Item.prefix.2.Key1.prefix.1.Name
+// * Item.prefix.2.Key1.prefix.1.Value
+// * Item.prefix.2.Key2.prefix.2.Whatever
+// * Item.prefix.2.Key2.prefix.2.Whatever
+function addParamData(params, name, data, prefix) {
+    var member = prefix ? '.' + prefix : '';
+
+    if ( _.isString(data) || _.isNumber(data) || _.isBoolean(data) ) {
+        params.push({ 'name' : name, 'value' : '' + data });
+        return;
+    }
+
+    if ( _.isArray(data) ) {
+        // console.log('array=', data);
+        _.each(data, function(value, i) {
+            // should be another data structure, so recurse down it
+            addParamData(params, name + member + '.' + (i+1), value, prefix);
+        });
+        return;
+    }
+
+    if ( _.isObject(data) ) {
+        // console.log('object=', data);
+        _.each(data, function(value, key) {
+            // should be another data structure, so recurse down it
+            addParamData(params, name + '.' + key, value, prefix);
+        });
+        return;
+    }
+}
+
+function addParamJson(field, name, value) {
+    if ( ! _.isUndefined(value) ) {
+        field.push({ 'name' : name, 'value' : JSON.stringify(value) });
+    }
+}
+
+function addFormIfDefined(field, name, value) {
+    if ( ! _.isUndefined(value) ) {
+        field.push({ 'name' : name, 'value' : value });
+    }
+}
+
+function addJsonIfDefined(json, name, value) {
+    if ( ! _.isUndefined(value) ) {
+        json[name] = value;
+    }
+}
+
+function setHeader(header, name, value) {
+    header[name] = value;
+}
+
+function setHeaderIfDefined(header, name, value) {
+    if ( ! _.isUndefined(value) ) {
+        header[name] = value;
+    }
+}
 
 // --------------------------------------------------------------------------------------------------------------------
 // constructor
@@ -609,11 +820,11 @@ RiakCS.prototype.send = function(operation, args, opts, callback) {
     }
 
     // now send the request
-    if( typeof options.body.pipe === "function" && options.body.readable ) {
-      sendRequest = self.requestStreamable
+    if( options.body && typeof options.body.pipe === "function" && options.body.readable ) {
+      sendRequest = self.requestStreamable.bind(self)
     }
     else {
-      sendRequest = self.request      
+      sendRequest = self.request.bind(self)      
     }
     sendRequest( options, function(err, res) {
         // an error with the request is an error full-stop
@@ -765,6 +976,10 @@ RiakCS.prototype.send = function(operation, args, opts, callback) {
         // console.log('CALLBACK: success');
         callback(null, result);
     });
+};
+
+RiakCS.prototype.agent = function() {
+    return this._agent;
 };
 
 // just takes the standard options and calls back with the result (or error)
